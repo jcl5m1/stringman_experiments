@@ -13,9 +13,8 @@ Related repo: [Stringman firmware](https://github.com/nhnifong/cranebot3-firmwar
 ## Alternative calibration approach
 
 This approach treats camera intrinsics as mostly fixed and fits the camera
-poses and tag/cube poses jointly, rather than relying on a standalone
-chessboard-style calibration for every camera. It is one of the main threads
-in this repo, and the pipeline is documented in detail in
+poses and tag/cube poses jointly from AprilTag observations. It is one of the
+main threads in this repo, and the pipeline is documented in detail in
 [calibration.md](calibration.md), including the solve formulation, the
 frame-tree output format, the reprojection overlays, and the observed errors
 for the current batch.
