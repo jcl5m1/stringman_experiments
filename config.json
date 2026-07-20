@@ -43,8 +43,8 @@
       "1": {
         "type": "cube",
         "width_mm": 125,
-        "gripper_camera_offset_mm": [41, 0, 530],
-        "gripper_camera_x_tilt_rad": 0.1571,
+        "gripper_camera_offset_mm": [0, -41, 530],
+        "gripper_camera_x_tilt_rad": -0.1571,
         "gripper_camera_offset_frame": "cube frame, origin at cube center; +z = face-tag tops direction (this cube hangs with +z pointing DOWN in the world); camera orientation = solved yaw about the cube z-axis (centered at the cube CENTER, so the whole mount offset rotates with it) followed by fixed x_tilt about the camera x-axis (radians, 0.1571 = 9 deg); y rotation fixed at 0"
       }
     }

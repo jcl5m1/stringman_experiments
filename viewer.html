@@ -38,7 +38,12 @@ const params = new URLSearchParams(location.search);
 const CAL_URL = params.get('calibration') || 'detections/20260720_083736_calibration.json';
 const CONFIG_URL = params.get('config') || 'config.json';
 const SOURCES = { captured: 'captures', detected: 'annotated', reprojected: 'reprojections' };
-const CAM_COLORS = [0xffa028, 0x28b4ff, 0xff4fd8, 0x9dff28]; // per camera index
+const CAM_COLORS = [0xffa028, 0x28b4ff, 0xff4fd8, 0x9dff28]; // per camera index (non-gripper)
+// palette matching the reprojection renderer (calibrate_extrinsics.py):
+// magenta = solved tag outlines, white = cube wireframe + gripper solution
+const TAG_COLOR = 0xff00ff;
+const WHITE = 0xffffff;
+const css = c => '#' + new THREE.Color(c).getHexString();
 const FRUSTUM_D = 1.0;   // frustum image-plane distance from the camera, meters
 const QUAD_OPACITY = 0.7;
 const FREE_FOV = 50;
@@ -58,7 +63,7 @@ const [CAL, CONFIG] = await Promise.all([
 ]).catch(e => fail('failed to load ' + e.message +
   '\n\nif you opened this file directly (file://), serve the repo instead:\n  python3 -m http.server\nthen open http://localhost:8000/viewer.html'));
 
-const CAMS = Object.keys(CAL.cameras).sort();
+const CAMS = Object.keys(CAL.frames).filter(n => CAL.frames[n].kind === 'camera').sort();
 // capture prefix for image filenames, e.g. "20260720_083736"
 const PREFIX = (() => {
   const cand = (CAL.source_detections || CAL_URL).split('/').pop();
@@ -126,22 +131,22 @@ function mat3Vec(A, v) {
     A[6]*v[0] + A[7]*v[1] + A[8]*v[2],
   ];
 }
-function xRot(th) { const c = Math.cos(th), s = Math.sin(th); return [1,0,0, 0,c,-s, 0,s,c]; }
-function zRot(th) { const c = Math.cos(th), s = Math.sin(th); return [c,-s,0, s,c,0, 0,0,1]; }
 
-// Gripper pose derived from the cube pose + mount constraint (offset + fixed
-// x-tilt from config.json via the calibration JSON, plus the solved theta):
-// the mount is one rigid body whose only DOF is the yaw theta about the cube
-// z-axis, centered at the cube center. Null when no constraint/cube exists.
-function gripperMountPose() {
-  const mc = CAL.cameras.gripper && CAL.cameras.gripper.mount_constraint;
-  if (!mc || !CAL.cube) return null;
-  const Rc = rodrigues(CAL.cube.rvec);
-  const Ryaw = zRot(mc.theta_rad || 0);
-  const R = mat3Mul(mat3Mul(Ryaw, xRot(mc.x_tilt_rad || 0)), mat3T(Rc));
-  const off = mat3Vec(Rc, mat3Vec(Ryaw, mc.offset_in_cube_frame_m));
-  const C = off.map((v, i) => v + CAL.cube.center_m[i]);
-  return { R, C };
+// World pose of a frame node, composed up the parent chain with the same
+// convention as Calibration.world_pose() in calibrate_extrinsics.py: each
+// node's R maps node coords -> parent coords and tvec_m is the node origin in
+// parent coords ("world" is the implicit identity root; the gripper's parent
+// is the cube). Returns { R: node -> world rotation, t: origin in world }.
+function worldPose(name) {
+  let R = [1,0,0, 0,1,0, 0,0,1], t = [0,0,0];
+  const chain = [];
+  for (let n = name; n !== 'world'; n = CAL.frames[n].parent) chain.push(n);
+  for (const n of chain.reverse()) {
+    const node = CAL.frames[n];
+    t = mat3Vec(R, node.tvec_m).map((v, i) => v + t[i]);
+    R = mat3Mul(R, rodrigues(node.rvec));
+  }
+  return { R, t };
 }
 
 // ---------------------------------------------------------------------------
@@ -208,30 +213,23 @@ const state = { mode: 'free', source: 'reprojected', alignedCam: null };
 const camQuads = {};   // cam -> Mesh (image quad)
 const camRms = {};     // cam -> rms px
 
-// per-camera world->cam rotation + center. The gripper pose is derived from
-// the cube pose + mount constraint (single DOF: yaw at the cube center), so
-// offset and orientation move as one rigid body; falls back to the stored
-// solved pose when no constraint exists.
+// per-camera world->cam rotation + center, resolved through the frame tree
+// (for the gripper this composes world -> cube -> gripper, i.e. the mount
+// constraint, exactly as the reprojection rendering via Calibration.cam_pose)
 const camPoses = {};
 for (const cam of CAMS) {
-  camPoses[cam] = {
-    R: rodrigues(CAL.cameras[cam].rvec_world_to_cam),
-    C: CAL.cameras[cam].position_m,
-  };
-}
-if (CAMS.includes('gripper')) {
-  const mountPose = gripperMountPose();
-  if (mountPose) camPoses.gripper = mountPose;
+  const wp = worldPose(cam); // wp.R: cam -> world; viewer R is world -> cam
+  camPoses[cam] = { R: mat3T(wp.R), C: wp.t };
 }
 
 CAMS.forEach((cam, idx) => {
-  const info = CAL.cameras[cam];
+  const info = CAL.frames[cam];
   const intr = intrinsicsFor(cam);
   const [w, h] = intr.resolution;
   const K = intr.K, fx = K[0][0], fy = K[1][1], cx = K[0][2], cy = K[1][2];
   const R = camPoses[cam].R, C = camPoses[cam].C;
   camRms[cam] = info.rms_px;
-  const color = CAM_COLORS[idx % CAM_COLORS.length];
+  const color = cam === 'gripper' ? WHITE : CAM_COLORS[idx % CAM_COLORS.length];
 
   const group = new THREE.Group();
   group.matrixAutoUpdate = false;
@@ -270,62 +268,66 @@ CAMS.forEach((cam, idx) => {
 // ---------------------------------------------------------------------------
 // tags + cube
 // ---------------------------------------------------------------------------
-for (const [id, info] of Object.entries(CAL.tags)) {
+for (const [name, info] of Object.entries(CAL.frames)) {
+  if (info.kind !== 'tag') continue;
+  const id = name.slice(4); // "tag_N" -> "N"
   const s = TAG_SIZES[id];
   if (!s) continue;
-  const R = rodrigues(info.rvec || [0,0,0]);
+  const wp = worldPose(name); // tag -> world
+  const R = wp.R;
   const g = new THREE.Group();
   g.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
     R[0],R[1],R[2],0, R[3],R[4],R[5],0, R[6],R[7],R[8],0, 0,0,0,1));
-  g.position.set(...info.position_m);
+  g.position.set(...wp.t);
   // tag frame: origin at lower-left corner, tag spans (0,0)-(s,s) in z=0 plane
   const fill = new THREE.PlaneGeometry(s, s);
   fill.translate(s/2, s/2, 0);
   g.add(new THREE.Mesh(fill, new THREE.MeshBasicMaterial({
-    color: 0x2bff88, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false })));
+    color: TAG_COLOR, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false })));
   const corners = [[0,s,0],[s,s,0],[s,0,0],[0,0,0]].map(p => new THREE.Vector3(...p));
   g.add(new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([...corners, corners[0]]),
-    new THREE.LineBasicMaterial({ color: 0x2bff88 })));
-  const label = makeLabel('tag ' + id, '#2bff88', 0.08);
+    new THREE.LineBasicMaterial({ color: TAG_COLOR })));
+  const label = makeLabel('tag ' + id, css(TAG_COLOR), 0.08);
   label.position.set(s/2, s/2, 0.03);
   g.add(label);
   scene.add(g);
 }
 
-if (CAL.cube) {
-  const R = rodrigues(CAL.cube.rvec);
+if (CAL.frames.cube) {
+  const cubePose = worldPose('cube'); // cube -> world
+  const R = cubePose.R;
   const g = new THREE.Group();
   g.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
     R[0],R[1],R[2],0, R[3],R[4],R[5],0, R[6],R[7],R[8],0, 0,0,0,1));
-  g.position.set(...CAL.cube.center_m);
-  const w = CAL.cube.width_m;
+  g.position.set(...cubePose.t);
+  const w = CAL.frames.cube.width_m;
   g.add(new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(w, w, w)),
-    new THREE.LineBasicMaterial({ color: 0xffffff })));
+    new THREE.LineBasicMaterial({ color: WHITE })));
   scene.add(g);
 
   // gripper mount offset as an L-shaped pair of segments (same as the
-  // reprojection rendering): cube center -> elbow along cube-frame z,
-  // elbow -> gripper center along cube-frame y, both rotated by the solved
-  // yaw theta (the mount rotates about the cube center as one rigid body)
-  const mc = CAL.cameras.gripper && CAL.cameras.gripper.mount_constraint;
-  if (mc) {
-    const off = mc.offset_in_cube_frame_m;
-    const Ryaw = zRot(mc.theta_rad || 0);
-    const yawed = v => mat3Vec(R, mat3Vec(Ryaw, v)); // cube-frame vec -> world
-    const cubeC = new THREE.Vector3(...CAL.cube.center_m);
+  // reprojection rendering): cube center -> elbow along the cube z-axis,
+  // elbow -> gripper center along the horizontal. Derived from the gripper's
+  // baked cube-relative pose: its z component is the vertical part, the x/y
+  // components form the horizontal arm.
+  const gripFrame = CAL.frames.gripper;
+  if (gripFrame && gripFrame.parent === 'cube') {
+    const gt = gripFrame.tvec_m;
+    const cubeC = new THREE.Vector3(...cubePose.t);
     const gripC = new THREE.Vector3(...camPoses.gripper.C);
-    const elbow = cubeC.clone().add(new THREE.Vector3(...yawed([0, 0, off[2]])));
+    const elbow = cubeC.clone().add(new THREE.Vector3(...mat3Vec(R, [0, 0, gt[2]])));
+    const hAxis = Math.abs(gt[0]) >= Math.abs(gt[1]) ? 'x' : 'y';
     const seg = (a, b, color) => scene.add(new THREE.Line(
       new THREE.BufferGeometry().setFromPoints([a, b]),
       new THREE.LineBasicMaterial({ color })));
-    seg(cubeC, elbow, 0x4f8cff);  // z-axis shift
-    seg(elbow, gripC, 0x51cf66);  // y-axis shift
-    const zLabel = makeLabel('z', '#4f8cff', 0.07);
+    seg(cubeC, elbow, WHITE);  // z-axis shift
+    seg(elbow, gripC, WHITE);  // horizontal (hAxis) shift
+    const zLabel = makeLabel('z', css(WHITE), 0.07);
     zLabel.position.copy(cubeC).lerp(elbow, 0.5);
     scene.add(zLabel);
-    const yLabel = makeLabel('y', '#51cf66', 0.07);
+    const yLabel = makeLabel(hAxis, css(WHITE), 0.07);
     yLabel.position.copy(elbow).lerp(gripC, 0.5);
     scene.add(yLabel);
   }
@@ -335,6 +337,39 @@ if (CAL.cube) {
 // aligned mode: animate the render camera onto a solved camera pose
 // ---------------------------------------------------------------------------
 let tween = null;
+
+const WORLD_ORIGIN = new THREE.Vector3(0, 0, 0); // tag 0 lower-left corner
+
+// NDC (screen) position of the world origin under the given camera state
+function originNDC(cam) {
+  cam.updateMatrixWorld();
+  cam.updateProjectionMatrix();
+  const p = WORLD_ORIGIN.clone().project(cam);
+  return new THREE.Vector2(p.x, p.y);
+}
+
+// z-up spherical coordinates about the world origin: radius, azimuth (about
+// +z, from +x), polar (from +z). The align flight interpolates position in
+// these coords so it arcs like an orbit instead of cutting a straight line.
+function toSpherical(p) {
+  const r = p.length();
+  return { r, az: Math.atan2(p.y, p.x), pol: Math.acos(THREE.MathUtils.clamp(p.z / r, -1, 1)) };
+}
+function fromSpherical(s) {
+  const sp = Math.sin(s.pol);
+  return new THREE.Vector3(s.r * sp * Math.cos(s.az), s.r * sp * Math.sin(s.az), s.r * Math.cos(s.pol));
+}
+const wrapPi = a => ((a + Math.PI) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI) - Math.PI; // -> (-pi, pi]
+
+// roll angle of the camera up about the camera->origin axis f: the twist
+// component of q once the swing (which puts the origin at its screen
+// position) is factored out: q = twist * swing, twist rotating about f
+function rollAngle(q, f) {
+  const want = f.clone().applyQuaternion(q.clone().invert()); // origin dir, local
+  const swing = new THREE.Quaternion().setFromUnitVectors(want, f);
+  const twist = q.clone().multiply(swing.clone().invert());
+  return 2*Math.atan2(twist.x*f.x + twist.y*f.y + twist.z*f.z, twist.w);
+}
 
 function setSource(src) {
   if (!SOURCES[src]) return;
@@ -358,12 +393,27 @@ function alignTo(cam, instant) {
   state.mode = 'aligned';
   state.alignedCam = cam;
   controls.enabled = false;
+  const toPos = new THREE.Vector3(...pose.C);
+  const toQ = camQuaternion(pose.R);
+  const toFov = 2*Math.atan(h/(2*K[1][1]))*180/Math.PI;
+  const toAspect = w/h;
+  // screen position of the world origin at the start and end of the flight;
+  // animate() interpolates it so the origin stays in view throughout
+  const goalCam = new THREE.PerspectiveCamera(toFov, toAspect, 0.01, 200);
+  goalCam.position.copy(toPos);
+  goalCam.quaternion.copy(toQ);
+  // camera->origin axes at both ends, for the roll interpolation
+  const fFrom = WORLD_ORIGIN.clone().sub(camera.position).normalize();
+  const fTo = WORLD_ORIGIN.clone().sub(toPos).normalize();
   tween = {
     t0: performance.now(), dur: instant ? 0 : 1600,
-    fromPos: camera.position.clone(), toPos: new THREE.Vector3(...pose.C),
-    fromQ: camera.quaternion.clone(), toQ: camQuaternion(pose.R),
-    fromFov: camera.fov, toFov: 2*Math.atan(h/(2*K[1][1]))*180/Math.PI,
-    fromAspect: camera.aspect, toAspect: w/h,
+    fromPos: camera.position.clone(), toPos,
+    fromSph: toSpherical(camera.position), toSph: toSpherical(toPos),
+    rollFrom: rollAngle(camera.quaternion, fFrom),
+    rollTo: rollAngle(toQ, fTo),
+    fromFov: camera.fov, toFov,
+    fromAspect: camera.aspect, toAspect,
+    ndcFrom: originNDC(camera), ndcTo: originNDC(goalCam),
   };
   updateHUD();
 }
@@ -390,8 +440,9 @@ function updateHUD() {
     '<b>' + PREFIX + ' calibration</b>  (overall rms ' + CAL.overall_rms_px + ' px)\n' +
     'mode:   ' + mode + '\n' +
     'images: ' + state.source + '\n' +
-    '<span class="dim">[1/2/3] align ' + CAMS.join('/') +
-    ' · [c/d/r] captured/detected/reprojected · [esc or drag] free orbit</span>';
+    '<span class="dim">[1/2/3] align ' + CAMS.join('/') + '\n' +
+    '[c/d/r] captured/detected/reprojected\n' +
+    '[esc or drag] free orbit</span>';
 }
 
 window.addEventListener('keydown', e => {
@@ -426,11 +477,34 @@ function animate() {
   requestAnimationFrame(animate);
   if (tween) {
     let t = tween.dur === 0 ? 1 : Math.min((performance.now() - tween.t0) / tween.dur, 1);
-    const e = t*t*(3 - 2*t);
-    camera.position.lerpVectors(tween.fromPos, tween.toPos, e);
-    camera.quaternion.slerpQuaternions(tween.fromQ, tween.toQ, e);
+    const e = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; // easeInOutCubic
+    // position: orbit-like arc about the origin in spherical coords (azimuth
+    // takes the shortest way around; straight-line lerp only as a degenerate
+    // fallback when an endpoint sits at the origin)
+    if (tween.fromSph.r > 1e-6 && tween.toSph.r > 1e-6) {
+      const dAz = wrapPi(tween.toSph.az - tween.fromSph.az);
+      camera.position.copy(fromSpherical({
+        r: tween.fromSph.r + (tween.toSph.r - tween.fromSph.r)*e,
+        az: tween.fromSph.az + dAz*e,
+        pol: tween.fromSph.pol + (tween.toSph.pol - tween.fromSph.pol)*e,
+      }));
+    } else {
+      camera.position.lerpVectors(tween.fromPos, tween.toPos, e);
+    }
     camera.fov = tween.fromFov + (tween.toFov - tween.fromFov)*e;
     camera.aspect = tween.fromAspect + (tween.toAspect - tween.fromAspect)*e;
+    // orientation: swing puts the world origin at its interpolated screen
+    // position; the roll about the camera->origin axis is interpolated
+    // between the start and end poses. Both ends are exact, so the flight
+    // starts without a jump and finishes at the exact solved pose.
+    const ndc = new THREE.Vector2().lerpVectors(tween.ndcFrom, tween.ndcTo, e);
+    const tanY = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const want = new THREE.Vector3(ndc.x * tanY * camera.aspect, ndc.y * tanY, -1).normalize();
+    const f = WORLD_ORIGIN.clone().sub(camera.position).normalize();
+    const swing = new THREE.Quaternion().setFromUnitVectors(want, f);
+    const roll = new THREE.Quaternion().setFromAxisAngle(f,
+      tween.rollFrom + wrapPi(tween.rollTo - tween.rollFrom)*e);
+    camera.quaternion.copy(roll).multiply(swing);
     camera.updateProjectionMatrix();
     if (t === 1) tween = null;
   }
@@ -438,9 +512,8 @@ function animate() {
 
   renderer.setScissorTest(false);
   renderer.clear(true, true, false);
-  if (state.mode === 'aligned') { // letterbox to the solved camera's image aspect
-    const intr = intrinsicsFor(state.alignedCam);
-    const v = letterbox(intr.resolution[0] / intr.resolution[1]);
+  if (state.mode === 'aligned') { // letterbox to the (interpolated) image aspect
+    const v = letterbox(camera.aspect);
     renderer.setViewport(v.x, v.y, v.w, v.h);
     renderer.setScissor(v.x, v.y, v.w, v.h);
     renderer.setScissorTest(true);

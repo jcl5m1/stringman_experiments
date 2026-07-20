@@ -29,9 +29,9 @@ minimizing AprilTag corner reprojection error with
   from `config.json` (`apriltags.marker_objects."1".gripper_camera_offset_mm`
   = (41, 0, 530) mm in the cube frame whose +z points down in the world), orientation = solved yaw
   about the cube z-axis CENTERED AT THE CUBE CENTER (the whole mount offset
-  rotates with it) followed by a fixed 9 deg pitch about the camera x-axis
-  (`gripper_camera_x_tilt_rad` = 0.1571; the data clearly prefers +9 deg over
-  -9 deg: 0.81 px vs 1.60 px overall RMS). The solve optimizes that single
+  rotates with it) followed by a fixed -9 deg pitch about the camera x-axis
+  (`gripper_camera_x_tilt_rad` = -0.1571; the camera is rolled 180 deg in its
+  mount, which the negative tilt encodes). The solve optimizes that single
   yaw angle; gripper observations therefore also pull on the cube pose
   through the rigid link. Without the offset or cube detections it falls back
   to free 6-DOF initialized from tag 0.
@@ -39,8 +39,35 @@ minimizing AprilTag corner reprojection error with
   >= 2 cameras (0, 5, 6, 7 + cube); stage 2 adds single-camera tags
   (2, 4, 9, 11), initialized from the stage-1 camera poses.
 
-Result on the `20260720_083736` batch: overall RMS **0.83 px** (anchor0 0.59,
-anchor1 0.81, gripper 1.74, cube 1.96; solved gripper yaw 315 deg).
+Result on the `20260720_083736` batch: overall RMS **0.88 px** (anchor0 0.64,
+anchor1 0.86, gripper 1.76, cube 2.32; solved gripper yaw -135.4 deg).
+The mount rotation is composed yaw-about-cube-z THEN tilt about the yawed
+mount x-axis (`R_w2c = (R_z(yaw) @ R_x(tilt))^T @ R_cube2world^T`), so the
+camera x-axis stays exactly perpendicular to the cube z-axis.
+
+### Output format: frame tree (`frames`)
+
+`<prefix>_calibration.json` stores every posed entity under `frames` as a
+parent->child transform tree rooted at the implicit `world` (= tag 0 frame).
+Each node has:
+
+- `parent`: parent frame name (`world` for everything except the gripper,
+  whose parent is `cube`).
+- `kind`: `camera` | `tag` | `cube`.
+- `rvec`, `tvec_m`: the node's pose RELATIVE TO ITS PARENT: R =
+  Rodrigues(rvec) maps node coordinates to parent coordinates, `tvec_m` is
+  the node origin in parent coordinates (meters). For cameras R is cam ->
+  parent (the transpose of the usual OpenCV world -> cam rotation).
+- extras by kind: `intrinsics` + `rms_px` (cameras), `rms_px` (+ `fixed` on
+  tag 0) for tags, `width_m` + `face_assignment` + `rms_px` (cube). The
+  gripper's mount constraint is fully baked into its `rvec`/`tvec_m` (its
+  pose relative to the cube), so no separate mount parameters are stored.
+
+World poses are composed by walking the parent chain:
+(R, t) = (R_parent @ R_node, R_parent @ t_node + t_parent). Both renderers
+use this exact composition — `Calibration.world_pose()` in
+`calibrate_extrinsics.py` (reprojection overlays) and `worldPose()` in
+`viewer.html` (3D scene) — so the two interpret the file identically.
 
 ### Reprojection overlays
 

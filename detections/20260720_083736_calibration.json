@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-20T12:39:19+0800",
+  "generated_at": "2026-07-20T15:35:38+0800",
   "source_detections": "detections/20260720_083736_detections.json",
   "intrinsics": {
     "anchor": {
@@ -66,7 +66,198 @@
     }
   },
   "world_frame": "tag 0 frame: origin at tag 0 lower-left corner, z-up",
-  "overall_rms_px": 0.83,
+  "frames": {
+    "anchor0": {
+      "parent": "world",
+      "kind": "camera",
+      "rvec": [
+        -0.338425,
+        -2.547748,
+        1.563675
+      ],
+      "tvec_m": [
+        0.7021,
+        2.4914,
+        2.087
+      ],
+      "intrinsics": "anchor",
+      "rms_px": 0.479
+    },
+    "anchor1": {
+      "parent": "world",
+      "kind": "camera",
+      "rvec": [
+        -2.051432,
+        0.29901,
+        -0.06549
+      ],
+      "tvec_m": [
+        -0.5955,
+        -1.8244,
+        2.1412
+      ],
+      "intrinsics": "anchor",
+      "rms_px": 0.618
+    },
+    "tag_2": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.007545,
+        -0.02848,
+        2.413435
+      ],
+      "tvec_m": [
+        -1.7174,
+        0.1413,
+        -0.6656
+      ],
+      "rms_px": 0.131
+    },
+    "tag_5": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        -0.033653,
+        0.018692,
+        -0.148663
+      ],
+      "tvec_m": [
+        0.1538,
+        0.4169,
+        0.0003
+      ],
+      "rms_px": 0.967
+    },
+    "tag_6": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.019472,
+        -0.01203,
+        -1.430619
+      ],
+      "tvec_m": [
+        -0.6618,
+        0.3689,
+        0.0073
+      ],
+      "rms_px": 0.629
+    },
+    "tag_7": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.062567,
+        -0.008102,
+        2.141274
+      ],
+      "tvec_m": [
+        0.9342,
+        -0.1146,
+        -0.0226
+      ],
+      "rms_px": 0.717
+    },
+    "tag_9": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.006611,
+        0.018771,
+        3.097591
+      ],
+      "tvec_m": [
+        -1.5286,
+        -0.6558,
+        -0.6673
+      ],
+      "rms_px": 0.138
+    },
+    "tag_4": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.002577,
+        -0.010888,
+        2.049269
+      ],
+      "tvec_m": [
+        0.4155,
+        2.0963,
+        -0.8225
+      ],
+      "rms_px": 0.244
+    },
+    "tag_11": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.045127,
+        0.026524,
+        1.572175
+      ],
+      "tvec_m": [
+        -0.6571,
+        1.3329,
+        -0.7679
+      ],
+      "rms_px": 0.212
+    },
+    "tag_0": {
+      "parent": "world",
+      "kind": "tag",
+      "rvec": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tvec_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rms_px": 0.931,
+      "fixed": "world frame anchor"
+    },
+    "cube": {
+      "parent": "world",
+      "kind": "cube",
+      "rvec": [
+        2.421871,
+        1.967415,
+        -0.048104
+      ],
+      "tvec_m": [
+        0.1411,
+        0.2372,
+        1.5553
+      ],
+      "width_m": 0.125,
+      "rms_px": 0.889,
+      "face_assignment": {
+        "20260720_083736_anchor0.jpg": "+X",
+        "20260720_083736_anchor1.jpg": "-X"
+      }
+    },
+    "gripper": {
+      "parent": "cube",
+      "kind": "camera",
+      "rvec": [
+        -0.073729,
+        0.18795,
+        -2.387823
+      ],
+      "tvec_m": [
+        -0.0279,
+        0.0301,
+        0.53
+      ],
+      "intrinsics": "gripper",
+      "rms_px": 1.605
+    }
+  },
+  "overall_rms_px": 0.681,
   "stages": [
     {
       "stage": 1,
@@ -101,198 +292,5 @@
         "gripper"
       ]
     }
-  ],
-  "cameras": {
-    "anchor0": {
-      "position_m": [
-        0.6986,
-        2.4914,
-        2.1016
-      ],
-      "rvec_world_to_cam": [
-        0.341097,
-        2.551714,
-        -1.560245
-      ],
-      "tvec_world_to_cam": [
-        0.041761,
-        0.688686,
-        3.261268
-      ],
-      "rms_px": 0.593
-    },
-    "anchor1": {
-      "position_m": [
-        -0.5978,
-        -1.8227,
-        2.1522
-      ],
-      "rvec_world_to_cam": [
-        2.054198,
-        -0.299889,
-        0.066088
-      ],
-      "tvec_world_to_cam": [
-        0.312429,
-        0.93875,
-        2.707853
-      ],
-      "rms_px": 0.809
-    },
-    "gripper": {
-      "position_m": [
-        0.1829,
-        0.2292,
-        1.031
-      ],
-      "rvec_world_to_cam": [
-        -0.914339,
-        2.89531,
-        0.131085
-      ],
-      "tvec_world_to_cam": [
-        0.207192,
-        -0.199436,
-        1.032625
-      ],
-      "rms_px": 1.735,
-      "mount_constraint": {
-        "offset_in_cube_frame_m": [
-          0.041,
-          0.0,
-          0.53
-        ],
-        "x_tilt_rad": 0.1571,
-        "x_tilt_deg": 9.0,
-        "source": "config.json apriltags.marker_objects.\"1\"",
-        "note": "rigid mount in the tag-1 cube frame; solved yaw about the cube z-axis, fixed x-tilt about the camera x-axis, y rotation 0; pose derived from cube pose + theta",
-        "theta_rad": 5.4986,
-        "theta_deg": 315.0
-      }
-    }
-  },
-  "tags": {
-    "2": {
-      "rvec": [
-        0.005435,
-        -0.033377,
-        2.413006
-      ],
-      "position_m": [
-        -1.7139,
-        0.1505,
-        -0.6649
-      ],
-      "rms_px": 0.131
-    },
-    "4": {
-      "rvec": [
-        0.001051,
-        -0.007805,
-        2.04864
-      ],
-      "position_m": [
-        0.4149,
-        2.0889,
-        -0.823
-      ],
-      "rms_px": 0.244
-    },
-    "5": {
-      "rvec": [
-        -1.559275,
-        0.852448,
-        -6.189345
-      ],
-      "position_m": [
-        0.1538,
-        0.4164,
-        0.0006
-      ],
-      "rms_px": 1.053
-    },
-    "6": {
-      "rvec": [
-        0.020578,
-        -0.01223,
-        -1.43131
-      ],
-      "position_m": [
-        -0.6632,
-        0.3702,
-        0.0065
-      ],
-      "rms_px": 0.598
-    },
-    "7": {
-      "rvec": [
-        0.060424,
-        -0.00869,
-        2.14041
-      ],
-      "position_m": [
-        0.9359,
-        -0.1161,
-        -0.0217
-      ],
-      "rms_px": 0.662
-    },
-    "9": {
-      "rvec": [
-        0.002267,
-        0.014079,
-        3.097194
-      ],
-      "position_m": [
-        -1.5254,
-        -0.6466,
-        -0.6685
-      ],
-      "rms_px": 0.138
-    },
-    "11": {
-      "rvec": [
-        0.043087,
-        0.028949,
-        1.571473
-      ],
-      "position_m": [
-        -0.6581,
-        1.3263,
-        -0.7659
-      ],
-      "rms_px": 0.212
-    },
-    "0": {
-      "position_m": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "rvec": [
-        0.0,
-        0.0,
-        0.0
-      ],
-      "fixed": "world frame anchor"
-    }
-  },
-  "cube": {
-    "center_m": [
-      0.1431,
-      0.2502,
-      1.5607
-    ],
-    "rvec": [
-      -1.99168,
-      2.378783,
-      -0.002373
-    ],
-    "width_m": 0.125,
-    "face_assignment": {
-      "20260720_083736_anchor0.jpg": "-X",
-      "20260720_083736_anchor1.jpg": "+X"
-    },
-    "rms_px": 1.957
-  }
+  ]
 }

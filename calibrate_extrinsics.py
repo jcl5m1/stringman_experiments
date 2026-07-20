@@ -425,26 +425,76 @@ class Calibration:
         self.gripper_cube_offset in the cube frame. The yaw theta about the
         cube z-axis is centered at the CUBE CENTER, so the whole mount
         (camera offset included) rotates with it; the fixed x-tilt then
-        pitches the camera about its own x-axis."""
+        pitches the camera about the mount's own (yawed) x-axis. Composed as
+        R_w2c = (R_z(theta) @ R_x(tilt)).T @ R_c2w.T, so the camera x-axis
+        stays perpendicular to the cube z-axis."""
         R_c2w = rodrigues(cube_pose[0])
         R_yaw = rodrigues(np.array([0.0, 0.0, theta]))
         C_w = R_c2w @ (R_yaw @ self.gripper_cube_offset) + cube_pose[1]
         R_mount = R_yaw @ rodrigues(np.array([self.gripper_x_tilt, 0.0, 0.0]))
-        R_w2c = R_mount @ R_c2w.T
+        R_w2c = R_mount.T @ R_c2w.T
         t_w2c = -R_w2c @ C_w
         rvec, _ = cv2.Rodrigues(R_w2c)
         return rvec.flatten(), t_w2c
 
+    def frames(self):
+        """Parent->child transform tree of everything with a pose. Each node:
+        parent name, R (rotation of the node frame relative to its parent),
+        t (node origin in parent coordinates), kind, extras. "world" is the
+        implicit identity root; the gripper's parent is the cube."""
+        frames = {}
+        for cam, (rvec, tvec) in self.cameras.items():
+            frames[cam] = {
+                "parent": "world", "kind": "camera",
+                "R": rodrigues(rvec).T, "t": cam_center(rvec, tvec),
+            }
+        for tag_id, (rvec, tvec) in self.tags.items():
+            frames[f"tag_{tag_id}"] = {
+                "parent": "world", "kind": "tag",
+                "R": rodrigues(rvec), "t": tvec,
+            }
+        frames[f"tag_{ORIGIN_TAG}"] = {
+            "parent": "world", "kind": "tag", "R": np.eye(3), "t": np.zeros(3),
+            "fixed": True,
+        }
+        if self.cube_pose is not None:
+            frames["cube"] = {
+                "parent": "world", "kind": "cube",
+                "R": rodrigues(self.cube_pose[0]), "t": self.cube_pose[1],
+            }
+            if self.gripper_cube_offset is not None:
+                # mount constraint baked into the cube-relative pose: yaw
+                # about the cube z (centered at the cube origin, the offset
+                # rotates with it), then fixed x-tilt about the mount's own
+                # (yawed) x-axis - same composition as _gripper_pose_from
+                R_yaw = rodrigues(np.array([0.0, 0.0, self.gripper_theta]))
+                R_mount = R_yaw @ rodrigues(np.array([self.gripper_x_tilt, 0.0, 0.0]))
+                frames["gripper"] = {
+                    "parent": "cube", "kind": "camera",
+                    "R": R_mount,
+                    "t": R_yaw @ self.gripper_cube_offset,
+                }
+        return frames
+
+    def world_pose(self, name):
+        """(R, t) of a frame relative to world, composed up the parent chain."""
+        frames = self.frames()
+        R, t = np.eye(3), np.zeros(3)
+        chain = []
+        node = name
+        while node != "world":
+            chain.append(node)
+            node = frames[node]["parent"]
+        for node in reversed(chain):
+            R, t = R @ frames[node]["R"], R @ frames[node]["t"] + t
+        return R, t
+
     def cam_pose(self, cam):
-        """(rvec, tvec) world->cam for cam. The gripper pose is derived from
-        the cube pose + gripper_theta (mount constraint), not stored."""
-        if (
-            cam == "gripper"
-            and self.cube_pose is not None
-            and self.gripper_cube_offset is not None
-        ):
-            return self._gripper_pose_from(self.cube_pose, self.gripper_theta)
-        return self.cameras[cam]
+        """(rvec, tvec) world->cam for cam, resolved through the frame tree."""
+        R, t = self.world_pose(cam)
+        R_w2c, t_w2c = R.T, -R.T @ t
+        rvec, _ = cv2.Rodrigues(R_w2c)
+        return rvec.flatten(), t_w2c
 
     def project_norm(self, points_w, cam):
         """world points -> normalized pinhole coords of cam. z clamped > 0 so
@@ -636,15 +686,14 @@ def rms_px_for_obs(cal, obs):
 def draw_gripper_solution(out, cal, rvec, tvec, K, dist):
     """Draw the solved gripper camera (center dot, label, and a small frustum
     matching its intrinsics) and the L-shaped mount offset from the cube
-    center: first the cube-frame z segment, then the y segment, as two white
-    line segments."""
+    center: first the cube-frame z segment, then the horizontal (x/y) segment
+    to the gripper center, as two white line segments."""
     grip_rvec, grip_tvec = cal.cam_pose("gripper")
     grip_C = cam_center(grip_rvec, grip_tvec)
     R_c2w = rodrigues(cal.cube_pose[0])
     cube_C = cal.cube_pose[1]
     R_yaw = rodrigues(np.array([0.0, 0.0, cal.gripper_theta]))
     z_part = R_c2w @ (R_yaw @ np.array([0.0, 0.0, cal.gripper_cube_offset[2]]))
-    y_part = R_c2w @ (R_yaw @ np.array([0.0, cal.gripper_cube_offset[1], 0.0]))
     elbow = cube_C + z_part
     # frustum at depth d matching the gripper intrinsics: rays through the
     # image corners of the 384x384 frame
@@ -669,7 +718,7 @@ def draw_gripper_solution(out, cal, rvec, tvec, K, dist):
     )
     p = pts.reshape(-1, 2).astype(int)
     cv2.line(out, tuple(p[0]), tuple(p[1]), (255, 255, 255), 2)  # z offset
-    cv2.line(out, tuple(p[1]), tuple(p[2]), (255, 255, 255), 2)  # y offset
+    cv2.line(out, tuple(p[1]), tuple(p[2]), (255, 255, 255), 2)  # horizontal offset
     cv2.circle(out, tuple(p[2]), 5, (255, 255, 255), -1)  # gripper camera center
     frustum = p[3:]
     for i in range(4):  # edges from center + image-plane rectangle
@@ -718,62 +767,40 @@ def render_reprojection(image, cal, cam, observations, note=None):
 
 
 def save_results_json(path, cal, observations, detections_path, stages):
-    def pose_entry(rvec, tvec):
-        return {
-            "rvec": [round(float(v), 6) for v in rvec],
-            "position_m": [round(float(v), 4) for v in tvec],
-        }
+    frames = cal.frames()
 
-    cams = {}
-    for cam in sorted({o["cam"] for o in observations}):
-        rvec, tvec = cal.cam_pose(cam)
-        obs_list = [o for o in observations if o["cam"] == cam]
-        rms = [rms_px_for_obs(cal, o) for o in obs_list]
+    def mean_rms(obs_list):
+        if not obs_list:
+            return None
+        return round(float(np.mean([rms_px_for_obs(cal, o) for o in obs_list])), 3)
+
+    out = {}
+    for name, node in frames.items():
+        rvec, _ = cv2.Rodrigues(node["R"])
         entry = {
-            "position_m": [round(float(v), 4) for v in cam_center(rvec, tvec)],
-            "rvec_world_to_cam": [round(float(v), 6) for v in rvec],
-            "tvec_world_to_cam": [round(float(v), 6) for v in tvec],
-            "rms_px": round(float(np.mean(rms)), 3) if rms else None,
+            "parent": node["parent"],
+            "kind": node["kind"],
+            "rvec": [round(float(v), 6) for v in rvec.flatten()],
+            "tvec_m": [round(float(v), 4) for v in node["t"]],
         }
-        if cam == "gripper" and cal.gripper_cube_offset is not None:
-            entry["mount_constraint"] = {
-                "offset_in_cube_frame_m": [round(float(v), 4) for v in cal.gripper_cube_offset],
-                "x_tilt_rad": round(float(cal.gripper_x_tilt), 4),
-                "x_tilt_deg": round(float(np.rad2deg(cal.gripper_x_tilt)), 2),
-                "source": "config.json apriltags.marker_objects.\"1\"",
-                "note": "rigid mount in the tag-1 cube frame; solved yaw about the "
-                "cube z-axis, fixed x-tilt about the camera x-axis, y rotation 0; "
-                "pose derived from cube pose + theta",
-                "theta_rad": round(float(cal.gripper_theta), 4),
-                "theta_deg": round(float(np.rad2deg(cal.gripper_theta)), 1),
-            }
-        cams[cam] = entry
-    tags = {}
-    for tag_id, (rvec, tvec) in sorted(cal.tags.items()):
-        obs_list = [o for o in observations if o["kind"] == "tag" and o["tag_id"] == tag_id]
-        rms = [rms_px_for_obs(cal, o) for o in obs_list]
-        entry = pose_entry(rvec, tvec)
-        entry["rms_px"] = round(float(np.mean(rms)), 3) if rms else None
-        tags[str(tag_id)] = entry
-    tags[str(ORIGIN_TAG)] = {
-        "position_m": [0.0, 0.0, 0.0],
-        "rvec": [0.0, 0.0, 0.0],
-        "fixed": "world frame anchor",
-    }
-    cube = None
-    if cal.cube_pose is not None:
-        rvec, tvec = cal.cube_pose
-        cube_obs = [o for o in observations if o["kind"] == "cube"]
-        rms = [rms_px_for_obs(cal, o) for o in cube_obs]
-        cube = {
-            "center_m": [round(float(v), 4) for v in tvec],
-            "rvec": [round(float(v), 6) for v in rvec],
-            "width_m": cal.cube_width_m,
-            "face_assignment": {
+        if node["kind"] == "camera":
+            entry["intrinsics"] = "gripper" if name == "gripper" else "anchor"
+            entry["rms_px"] = mean_rms([o for o in observations if o["cam"] == name])
+        elif node["kind"] == "tag":
+            entry["rms_px"] = mean_rms(
+                [o for o in observations if o["kind"] == "tag" and f"tag_{o['tag_id']}" == name]
+            )
+            if node.get("fixed"):
+                entry["fixed"] = "world frame anchor"
+        elif node["kind"] == "cube":
+            cube_obs = [o for o in observations if o["kind"] == "cube"]
+            entry["width_m"] = cal.cube_width_m
+            entry["rms_px"] = mean_rms(cube_obs)
+            entry["face_assignment"] = {
                 o["image"]: cal.face_assignment[id(o)] for o in cube_obs
-            },
-            "rms_px": round(float(np.mean(rms)), 3) if rms else None,
-        }
+            }
+        out[name] = entry
+
     all_rms = [rms_px_for_obs(cal, o) for o in observations]
     doc = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -794,11 +821,9 @@ def save_results_json(path, cal, observations, detections_path, stages):
             },
         },
         "world_frame": "tag 0 frame: origin at tag 0 lower-left corner, z-up",
+        "frames": out,
         "overall_rms_px": round(float(np.mean(all_rms)), 3) if all_rms else None,
         "stages": stages,
-        "cameras": cams,
-        "tags": tags,
-        "cube": cube,
     }
     Path(path).write_text(json.dumps(doc, indent=2) + "\n")
     print(f"saved {path}")
