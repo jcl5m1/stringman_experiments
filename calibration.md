@@ -4,6 +4,39 @@ How the extrinsic calibration in this repo works, how to run it, and (at the
 end) notes on where camera intrinsics are stored in the upstream
 [cranebot3-firmware](https://github.com/nhnifong/cranebot3-firmware) repo.
 
+### Reprojection overlays
+
+These overlays summarize the solved reprojection quality for the
+`20260720_083736` batch: overall RMS 0.88 px, with anchor0 0.64 px, anchor1
+0.86 px, gripper 1.76 px, and cube 2.32 px. Solved tag outlines (magenta),
+detected corners (green), cube wireframe (white), on frames dimmed to 33%.
+All three stages of each camera's frame side by side; hover for a label, click
+any thumbnail for full size:
+
+<table>
+  <tr>
+    <th>camera</th><th>captured</th><th>2D tag detection</th><th>solved 3D reprojections</th>
+  </tr>
+  <tr>
+    <td>anchor0</td>
+    <td><a href="captures/20260720_083736_anchor0.jpg"><img src="captures/20260720_083736_anchor0.jpg" width="300" title="anchor0 captured — click for full size"></a></td>
+    <td><a href="annotated/20260720_083736_anchor0.jpg"><img src="annotated/20260720_083736_anchor0.jpg" width="300" title="anchor0 tag detections — click for full size"></a></td>
+    <td><a href="reprojections/20260720_083736_anchor0.jpg"><img src="reprojections/20260720_083736_anchor0.jpg" width="300" title="anchor0 solved reprojection — click for full size"></a></td>
+  </tr>
+  <tr>
+    <td>anchor1</td>
+    <td><a href="captures/20260720_083736_anchor1.jpg"><img src="captures/20260720_083736_anchor1.jpg" width="300" title="anchor1 captured — click for full size"></a></td>
+    <td><a href="annotated/20260720_083736_anchor1.jpg"><img src="annotated/20260720_083736_anchor1.jpg" width="300" title="anchor1 tag detections — click for full size"></a></td>
+    <td><a href="reprojections/20260720_083736_anchor1.jpg"><img src="reprojections/20260720_083736_anchor1.jpg" width="300" title="anchor1 solved reprojection — click for full size"></a></td>
+  </tr>
+  <tr>
+    <td>gripper</td>
+    <td><a href="captures/20260720_083736_gripper.jpg"><img src="captures/20260720_083736_gripper.jpg" width="300" title="gripper captured — click for full size"></a></td>
+    <td><a href="annotated/20260720_083736_gripper.jpg"><img src="annotated/20260720_083736_gripper.jpg" width="300" title="gripper tag detections — click for full size"></a></td>
+    <td><a href="reprojections/20260720_083736_gripper.jpg"><img src="reprojections/20260720_083736_gripper.jpg" width="300" title="gripper solved reprojection — click for full size"></a></td>
+  </tr>
+</table>
+
 ## Local extrinsic calibration approach (this repo)
 
 `calibrate_extrinsics.py` solves camera extrinsics and tag poses jointly by
@@ -68,36 +101,6 @@ World poses are composed by walking the parent chain:
 use this exact composition — `Calibration.world_pose()` in
 `calibrate_extrinsics.py` (reprojection overlays) and `worldPose()` in
 `viewer.html` (3D scene) — so the two interpret the file identically.
-
-### Reprojection overlays
-
-Solved tag outlines (magenta), detected corners (green), cube wireframe
-(white), on frames dimmed to 33%. All three stages of each camera's frame
-side by side; hover for a label, click any thumbnail for full size:
-
-<table>
-  <tr>
-    <th>camera</th><th>captured</th><th>2D tag detection</th><th>solved 3D reprojections</th>
-  </tr>
-  <tr>
-    <td>anchor0</td>
-    <td><a href="captures/20260720_083736_anchor0.jpg"><img src="captures/20260720_083736_anchor0.jpg" width="300" title="anchor0 captured — click for full size"></a></td>
-    <td><a href="annotated/20260720_083736_anchor0.jpg"><img src="annotated/20260720_083736_anchor0.jpg" width="300" title="anchor0 tag detections — click for full size"></a></td>
-    <td><a href="reprojections/20260720_083736_anchor0.jpg"><img src="reprojections/20260720_083736_anchor0.jpg" width="300" title="anchor0 solved reprojection — click for full size"></a></td>
-  </tr>
-  <tr>
-    <td>anchor1</td>
-    <td><a href="captures/20260720_083736_anchor1.jpg"><img src="captures/20260720_083736_anchor1.jpg" width="300" title="anchor1 captured — click for full size"></a></td>
-    <td><a href="annotated/20260720_083736_anchor1.jpg"><img src="annotated/20260720_083736_anchor1.jpg" width="300" title="anchor1 tag detections — click for full size"></a></td>
-    <td><a href="reprojections/20260720_083736_anchor1.jpg"><img src="reprojections/20260720_083736_anchor1.jpg" width="300" title="anchor1 solved reprojection — click for full size"></a></td>
-  </tr>
-  <tr>
-    <td>gripper</td>
-    <td><a href="captures/20260720_083736_gripper.jpg"><img src="captures/20260720_083736_gripper.jpg" width="300" title="gripper captured — click for full size"></a></td>
-    <td><a href="annotated/20260720_083736_gripper.jpg"><img src="annotated/20260720_083736_gripper.jpg" width="300" title="gripper tag detections — click for full size"></a></td>
-    <td><a href="reprojections/20260720_083736_gripper.jpg"><img src="reprojections/20260720_083736_gripper.jpg" width="300" title="gripper solved reprojection — click for full size"></a></td>
-  </tr>
-</table>
 
 ## HACK / latent bug: gripper 384x384 intrinsics via center-crop assumption
 
