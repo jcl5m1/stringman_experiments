@@ -13,10 +13,6 @@ detected corners (green), cube wireframe (white), on frames dimmed to 33%.
 All three stages of each camera's frame side by side; hover for a label, click
 any thumbnail for full size:
 
-[![3D viewer screenshot](images/3d_viewer.jpg)](https://jcl5m1.github.io/stringman_experiments/viewer.html)
-
-Open the hosted 3D viewer: [https://jcl5m1.github.io/stringman_experiments/viewer.html](https://jcl5m1.github.io/stringman_experiments/viewer.html)
-
 <table>
   <tr>
     <th>camera</th><th>captured</th><th>2D tag detection</th><th>solved 3D reprojections</th>
@@ -40,6 +36,10 @@ Open the hosted 3D viewer: [https://jcl5m1.github.io/stringman_experiments/viewe
     <td><a href="reprojections/20260720_083736_gripper.jpg"><img src="reprojections/20260720_083736_gripper.jpg" width="300" title="gripper solved reprojection — click for full size"></a></td>
   </tr>
 </table>
+
+[![3D viewer screenshot](images/3d_viewer.jpg)](https://jcl5m1.github.io/stringman_experiments/viewer.html)
+
+Open the hosted 3D viewer: [https://jcl5m1.github.io/stringman_experiments/viewer.html](https://jcl5m1.github.io/stringman_experiments/viewer.html)
 
 ## Local extrinsic calibration approach (this repo)
 
