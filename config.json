@@ -1,0 +1,49 @@
+{
+  "subnet": null,
+  "discovered_at": "2026-07-20T07:16:44+0800",
+  "components": [
+    {
+      "label": "gripper",
+      "ip": "192.168.68.140",
+      "kind": "gripper",
+      "nf_robot_v": "4.1.0"
+    },
+    {
+      "label": "anchor0",
+      "ip": "192.168.68.139",
+      "kind": "anchor",
+      "nf_robot_v": null
+    },
+    {
+      "label": "anchor1",
+      "ip": "192.168.68.141",
+      "kind": "anchor",
+      "nf_robot_v": null
+    }
+  ],
+  "apriltags": {
+    "family": "tag36h11",
+    "side_length_mm": {
+      "0": 169,
+      "1": 91,
+      "2": 94,
+      "3": 94,
+      "4": 94,
+      "5": 169,
+      "6": 169,
+      "7": 169,
+      "8": 94,
+      "9": 94,
+      "10": 94,
+      "11": 94,
+      "12": 94,
+      "13": 45
+    },
+    "marker_objects": {
+      "1": {
+        "type": "cube",
+        "width_mm": 125
+      }
+    }
+  }
+}

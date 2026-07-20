@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>calibration viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d0f12; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    color: #e8e8e8; font: 13px/1.5 monospace;
+    background: rgba(0,0,0,0.62); padding: 10px 12px; border-radius: 6px;
+    pointer-events: none; white-space: pre;
+  }
+  #hud .dim { color: #9aa0a6; }
+  #hud .err { color: #ff6666; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">loading…</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------------------
+// data loading
+// ---------------------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const CAL_URL = params.get('calibration') || 'detections/20260720_083736_calibration.json';
+const CONFIG_URL = params.get('config') || 'config.json';
+const SOURCES = { captured: 'captures', detected: 'annotated', reprojected: 'reprojections' };
+const CAM_COLORS = [0xffa028, 0x28b4ff, 0xff4fd8, 0x9dff28]; // per camera index
+const FRUSTUM_D = 1.0;   // frustum image-plane distance from the camera, meters
+const QUAD_OPACITY = 0.7;
+const FREE_FOV = 50;
+
+const hud = document.getElementById('hud');
+function fail(msg) {
+  hud.innerHTML = '<span class="err">' + msg + '</span>';
+  throw new Error(msg);
+}
+window.addEventListener('error', e => {
+  hud.innerHTML = '<span class="err">error: ' + e.message + '</span>';
+});
+
+const [CAL, CONFIG] = await Promise.all([
+  fetch(CAL_URL).then(r => { if (!r.ok) throw new Error(CAL_URL + ': ' + r.status); return r.json(); }),
+  fetch(CONFIG_URL).then(r => { if (!r.ok) throw new Error(CONFIG_URL + ': ' + r.status); return r.json(); }),
+]).catch(e => fail('failed to load ' + e.message +
+  '\n\nif you opened this file directly (file://), serve the repo instead:\n  python3 -m http.server\nthen open http://localhost:8000/viewer.html'));
+
+const CAMS = Object.keys(CAL.cameras).sort();
+// capture prefix for image filenames, e.g. "20260720_083736"
+const PREFIX = (() => {
+  const cand = (CAL.source_detections || CAL_URL).split('/').pop();
+  const m = cand.match(/(.+)_(?:detections|calibration)\.json$/);
+  return m ? m[1] : cand.replace(/\.json$/, '');
+})();
+const TAG_SIZES = {}; // tag id -> side length in meters
+for (const [id, mm] of Object.entries(CONFIG.apriltags.side_length_mm)) TAG_SIZES[id] = mm / 1000;
+
+function intrinsicsFor(cam) {
+  return cam.startsWith('gripper') ? CAL.intrinsics.gripper : CAL.intrinsics.anchor;
+}
+function imageURL(source, cam) {
+  return SOURCES[source] + '/' + PREFIX + '_' + cam + '.jpg';
+}
+
+// ---------------------------------------------------------------------------
+// geometry helpers (OpenCV <-> three.js)
+// ---------------------------------------------------------------------------
+function rodrigues(rvec) { // -> row-major 3x3
+  const [rx, ry, rz] = rvec;
+  const th = Math.hypot(rx, ry, rz);
+  if (th < 1e-12) return [1,0,0, 0,1,0, 0,0,1];
+  const x = rx/th, y = ry/th, z = rz/th;
+  const c = Math.cos(th), s = Math.sin(th), C = 1-c;
+  return [
+    c+x*x*C,   x*y*C-z*s, x*z*C+y*s,
+    y*x*C+z*s, c+y*y*C,   y*z*C-x*s,
+    z*x*C-y*s, z*y*C+x*s, c+z*z*C,
+  ];
+}
+// OpenCV world->cam (rvec) + camera center C -> cam->world Matrix4 usable as a
+// three.js object transform. The cv camera frame (x right, y down, z forward)
+// is kept as the local frame, so frustum geometry is built in cv coords.
+function camGroupMatrix(R, C) {
+  return new THREE.Matrix4().set(
+    R[0], R[3], R[6], C[0],
+    R[1], R[4], R[7], C[1],
+    R[2], R[5], R[8], C[2],
+    0, 0, 0, 1);
+}
+// rotation part for a three.js PerspectiveCamera (looks down -z, +y up)
+// matching the same pose: Q = R^T * diag(1,-1,-1).
+function camQuaternion(R) {
+  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().set(
+    R[0], -R[3], -R[6], 0,
+    R[1], -R[4], -R[7], 0,
+    R[2], -R[5], -R[8], 0,
+    0, 0, 0, 1));
+}
+
+// ---------------------------------------------------------------------------
+// scene setup (world frame is z-up, as solved)
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+renderer.setClearColor(0x0d0f12, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0f12);
+
+const camera = new THREE.PerspectiveCamera(FREE_FOV, innerWidth/innerHeight, 0.01, 200);
+camera.up.set(0, 0, 1);
+camera.position.set(3.0, -3.0, 2.2);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.2, 0.5);
+controls.enableDamping = true;
+
+const grid = new THREE.GridHelper(6, 30, 0x3a3f47, 0x23262c);
+grid.rotation.x = Math.PI/2; // xz-plane grid -> xy plane (z-up world)
+scene.add(grid);
+scene.add(new THREE.AxesHelper(0.5));
+
+function makeLabel(text, colorCss, worldH) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  g.font = 'bold 64px monospace';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.shadowColor = 'black'; g.shadowBlur = 12;
+  g.fillStyle = colorCss;
+  g.fillText(text, 256, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  sp.scale.set(worldH*4, worldH, 1);
+  return sp;
+}
+
+// ---------------------------------------------------------------------------
+// textures (lazy per source)
+// ---------------------------------------------------------------------------
+const texLoader = new THREE.TextureLoader();
+const textures = {}; // source -> cam -> Texture
+function textureFor(source, cam) {
+  textures[source] = textures[source] || {};
+  if (!textures[source][cam]) {
+    const t = texLoader.load(imageURL(source, cam));
+    t.colorSpace = THREE.SRGBColorSpace;
+    textures[source][cam] = t;
+  }
+  return textures[source][cam];
+}
+
+// ---------------------------------------------------------------------------
+// camera rigs: frustum lines + image quad at the far end
+// ---------------------------------------------------------------------------
+const state = { mode: 'free', source: 'reprojected', alignedCam: null };
+const camQuads = {};   // cam -> Mesh (image quad)
+const camRms = {};     // cam -> rms px
+
+CAMS.forEach((cam, idx) => {
+  const info = CAL.cameras[cam];
+  const intr = intrinsicsFor(cam);
+  const [w, h] = intr.resolution;
+  const K = intr.K, fx = K[0][0], fy = K[1][1], cx = K[0][2], cy = K[1][2];
+  const R = rodrigues(info.rvec_world_to_cam);
+  const C = info.position_m;
+  camRms[cam] = info.rms_px;
+  const color = CAM_COLORS[idx % CAM_COLORS.length];
+
+  const group = new THREE.Group();
+  group.matrixAutoUpdate = false;
+  group.matrix.copy(camGroupMatrix(R, C));
+  scene.add(group);
+
+  // frustum lines: origin -> image corners, plus the image rectangle (cv coords)
+  const corner = (u, v) => new THREE.Vector3((u-cx)/fx*FRUSTUM_D, (v-cy)/fy*FRUSTUM_D, FRUSTUM_D);
+  const tl = corner(0,0), tr = corner(w,0), br = corner(w,h), bl = corner(0,h);
+  const o = new THREE.Vector3(0,0,0);
+  group.add(new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints([o,tl, o,tr, o,br, o,bl, tl,tr, tr,br, br,bl, bl,tl]),
+    new THREE.LineBasicMaterial({ color })));
+
+  // image quad (uv: v=0 image row is top -> uv.y=1 with flipY textures)
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([
+    tl.x,tl.y,tl.z, tr.x,tr.y,tr.z, br.x,br.y,br.z, bl.x,bl.y,bl.z], 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute([0,1, 1,1, 1,0, 0,0], 2));
+  geo.setIndex([0,1,2, 0,2,3]);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: textureFor(state.source, cam),
+    side: THREE.DoubleSide, transparent: true, opacity: QUAD_OPACITY, depthWrite: false,
+  }));
+  group.add(mesh);
+  camQuads[cam] = mesh;
+
+  // camera body marker + label
+  group.add(new THREE.Mesh(new THREE.SphereGeometry(0.025, 16, 12),
+    new THREE.MeshBasicMaterial({ color })));
+  const label = makeLabel(cam, '#' + new THREE.Color(color).getHexString(), 0.14);
+  label.position.set(0, 0, -0.16);
+  group.add(label);
+});
+
+// ---------------------------------------------------------------------------
+// tags + cube
+// ---------------------------------------------------------------------------
+for (const [id, info] of Object.entries(CAL.tags)) {
+  const s = TAG_SIZES[id];
+  if (!s) continue;
+  const R = rodrigues(info.rvec || [0,0,0]);
+  const g = new THREE.Group();
+  g.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
+    R[0],R[1],R[2],0, R[3],R[4],R[5],0, R[6],R[7],R[8],0, 0,0,0,1));
+  g.position.set(...info.position_m);
+  // tag frame: origin at lower-left corner, tag spans (0,0)-(s,s) in z=0 plane
+  const fill = new THREE.PlaneGeometry(s, s);
+  fill.translate(s/2, s/2, 0);
+  g.add(new THREE.Mesh(fill, new THREE.MeshBasicMaterial({
+    color: 0x2bff88, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false })));
+  const corners = [[0,s,0],[s,s,0],[s,0,0],[0,0,0]].map(p => new THREE.Vector3(...p));
+  g.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([...corners, corners[0]]),
+    new THREE.LineBasicMaterial({ color: 0x2bff88 })));
+  const label = makeLabel('tag ' + id, '#2bff88', 0.08);
+  label.position.set(s/2, s/2, 0.03);
+  g.add(label);
+  scene.add(g);
+}
+
+if (CAL.cube) {
+  const R = rodrigues(CAL.cube.rvec);
+  const g = new THREE.Group();
+  g.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
+    R[0],R[1],R[2],0, R[3],R[4],R[5],0, R[6],R[7],R[8],0, 0,0,0,1));
+  g.position.set(...CAL.cube.center_m);
+  const w = CAL.cube.width_m;
+  g.add(new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(w, w, w)),
+    new THREE.LineBasicMaterial({ color: 0xffffff })));
+  scene.add(g);
+}
+
+// ---------------------------------------------------------------------------
+// aligned mode: animate the render camera onto a solved camera pose
+// ---------------------------------------------------------------------------
+let tween = null;
+
+function setSource(src) {
+  if (!SOURCES[src]) return;
+  state.source = src;
+  for (const cam of CAMS) camQuads[cam].material.map = textureFor(src, cam);
+  updateHUD();
+}
+
+function letterbox(aspect) {
+  const W = innerWidth, H = innerHeight;
+  let vw = W, vh = W / aspect;
+  if (vh > H) { vh = H; vw = H * aspect; }
+  return { x: (W-vw)/2, y: (H-vh)/2, w: vw, h: vh };
+}
+
+function alignTo(cam, instant) {
+  const info = CAL.cameras[cam];
+  const intr = intrinsicsFor(cam);
+  const [w, h] = intr.resolution;
+  const K = intr.K;
+  const R = rodrigues(info.rvec_world_to_cam);
+  state.mode = 'aligned';
+  state.alignedCam = cam;
+  controls.enabled = false;
+  tween = {
+    t0: performance.now(), dur: instant ? 0 : 1600,
+    fromPos: camera.position.clone(), toPos: new THREE.Vector3(...info.position_m),
+    fromQ: camera.quaternion.clone(), toQ: camQuaternion(R),
+    fromFov: camera.fov, toFov: 2*Math.atan(h/(2*K[1][1]))*180/Math.PI,
+    fromAspect: camera.aspect, toAspect: w/h,
+  };
+  updateHUD();
+}
+
+function exitAligned() {
+  if (state.mode !== 'aligned') return;
+  state.mode = 'free';
+  state.alignedCam = null;
+  tween = null;
+  camera.aspect = innerWidth/innerHeight;
+  camera.fov = FREE_FOV;
+  camera.updateProjectionMatrix();
+  const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  controls.target.copy(camera.position).addScaledVector(fwd, 2.0);
+  controls.enabled = true;
+  updateHUD();
+}
+
+function updateHUD() {
+  const mode = state.mode === 'aligned'
+    ? 'aligned → ' + state.alignedCam + ' (rms ' + camRms[state.alignedCam] + ' px)'
+    : 'free orbit';
+  hud.innerHTML =
+    '<b>' + PREFIX + ' calibration</b>  (overall rms ' + CAL.overall_rms_px + ' px)\n' +
+    'mode:   ' + mode + '\n' +
+    'images: ' + state.source + '\n' +
+    '<span class="dim">[1/2/3] align ' + CAMS.join('/') +
+    ' · [c/d/r] captured/detected/reprojected · [esc or drag] free orbit</span>';
+}
+
+window.addEventListener('keydown', e => {
+  const camIdx = { '1': 0, '2': 1, '3': 2 }[e.key];
+  if (camIdx !== undefined && CAMS[camIdx]) { alignTo(CAMS[camIdx], false); return; }
+  const src = { c: 'captured', d: 'detected', r: 'reprojected' }[e.key];
+  if (src) { setSource(src); return; }
+  if (e.key === 'Escape' || e.key === '0') exitAligned();
+});
+renderer.domElement.addEventListener('pointerdown', exitAligned);
+
+window.addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  if (state.mode === 'free') {
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+  }
+});
+
+// deep link: viewer.html?cam=1&source=captured&calibration=detections/xxx_calibration.json
+if (params.get('source')) setSource(params.get('source'));
+if (params.get('cam')) {
+  const cam = CAMS[parseInt(params.get('cam'), 10) - 1];
+  if (cam) alignTo(cam, true);
+}
+updateHUD();
+
+// ---------------------------------------------------------------------------
+// render loop
+// ---------------------------------------------------------------------------
+function animate() {
+  requestAnimationFrame(animate);
+  if (tween) {
+    let t = tween.dur === 0 ? 1 : Math.min((performance.now() - tween.t0) / tween.dur, 1);
+    const e = t*t*(3 - 2*t);
+    camera.position.lerpVectors(tween.fromPos, tween.toPos, e);
+    camera.quaternion.slerpQuaternions(tween.fromQ, tween.toQ, e);
+    camera.fov = tween.fromFov + (tween.toFov - tween.fromFov)*e;
+    camera.aspect = tween.fromAspect + (tween.toAspect - tween.fromAspect)*e;
+    camera.updateProjectionMatrix();
+    if (t === 1) tween = null;
+  }
+  if (controls.enabled) controls.update();
+
+  renderer.setScissorTest(false);
+  renderer.clear(true, true, false);
+  if (state.mode === 'aligned') { // letterbox to the solved camera's image aspect
+    const intr = intrinsicsFor(state.alignedCam);
+    const v = letterbox(intr.resolution[0] / intr.resolution[1]);
+    renderer.setViewport(v.x, v.y, v.w, v.h);
+    renderer.setScissor(v.x, v.y, v.w, v.h);
+    renderer.setScissorTest(true);
+  } else {
+    renderer.setViewport(0, 0, innerWidth, innerHeight);
+  }
+  renderer.render(scene, camera);
+  renderer.setScissorTest(false);
+}
+animate();
+</script>
+</body>
+</html>
