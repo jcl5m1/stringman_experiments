@@ -4,6 +4,8 @@ Experiments with [Stringman from Newfangled robotics](https://neufangled.com/)
 
 ## 3D calibration viewer
 
+[![3D viewer screenshot](images/3d_viewer.jpg)](https://jcl5m1.github.io/stringman_experiments/viewer.html)
+
 `viewer.html` renders a solved calibration (camera poses, AprilTag poses, cube)
 as an interactive three.js scene, with each camera's frustum texture-mapped by
 its captured image. It loads the calibration JSON and images via relative URLs,
