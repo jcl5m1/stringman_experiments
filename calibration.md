@@ -13,6 +13,8 @@ detected corners (green), cube wireframe (white), on frames dimmed to 33%.
 All three stages of each camera's frame side by side; hover for a label, click
 any thumbnail for full size:
 
+[![3D viewer screenshot](images/3d_viewer.jpg)](https://jcl5m1.github.io/stringman_experiments/viewer.html)
+
 <table>
   <tr>
     <th>camera</th><th>captured</th><th>2D tag detection</th><th>solved 3D reprojections</th>
