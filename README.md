@@ -19,9 +19,9 @@ main threads in this repo, and the pipeline is documented in detail in
 frame-tree output format, the reprojection overlays, and the observed errors
 for the current batch.
 
-The key idea is to compare the firmware-derived intrinsics with the locally
-observed reprojection performance and to test whether the gripper camera pose
-can be constrained through the cube mount geometry. The current batch achieves
+The key idea is to jointly solve the extrinsic parameters of the cameras and
+AprilTag poses while minimizing 2D reprojection error, while also taking into
+account rigid constraints between tags and cameras. The current batch achieves
 overall reprojection RMS of about 0.88 px, with anchor0 0.64 px, anchor1
 0.86 px, gripper 1.76 px, and cube 2.32 px.
 
