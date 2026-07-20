@@ -2,9 +2,10 @@
 
 Experiments with [Stringman from Newfangled robotics](https://neufangled.com/)
 for camera calibration, AprilTag detection, and extrinsic pose estimation.
-This repository focuses on a single, prioritized experiment: a local
-alternative calibration approach that uses the firmware camera calibration data
-as a starting point and solves for camera extrinsics plus tag/cube poses by
+This repository collects a few current experiments around local calibration and
+visualization, with the most developed work centered on an alternative
+calibration approach that uses the firmware camera calibration data as a
+starting point and solves for camera extrinsics plus tag/cube poses by
 minimizing AprilTag corner reprojection error.
 
 Related repo: [Stringman firmware](https://github.com/nhnifong/cranebot3-firmware#readme)
@@ -13,10 +14,11 @@ Related repo: [Stringman firmware](https://github.com/nhnifong/cranebot3-firmwar
 
 This approach treats camera intrinsics as mostly fixed and fits the camera
 poses and tag/cube poses jointly, rather than relying on a standalone
-chessboard-style calibration for every camera. The pipeline is documented in
-detail in [calibration.md](calibration.md), including the solve formulation,
-the frame-tree output format, the reprojection overlays, and the observed
-errors for the current batch.
+chessboard-style calibration for every camera. It is one of the main threads
+in this repo, and the pipeline is documented in detail in
+[calibration.md](calibration.md), including the solve formulation, the
+frame-tree output format, the reprojection overlays, and the observed errors
+for the current batch.
 
 The key idea is to compare the firmware-derived intrinsics with the locally
 observed reprojection performance and to test whether the gripper camera pose
