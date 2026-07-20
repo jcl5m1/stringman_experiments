@@ -41,6 +41,7 @@ power_on() {
 }
 
 power_off
+wait_for 5
 power_on
 
 echo "Power cycle sequence completed."
