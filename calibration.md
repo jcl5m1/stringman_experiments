@@ -24,16 +24,23 @@ minimizing AprilTag corner reprojection error with
   the faces are forced to be OPPOSITE sides (the anchors see opposite sides of
   the hanging cube). This constraint is what made the cube converge (12.6 px
   -> 0.6 px RMS).
-- **Gripper camera**: 6-DOF extrinsics solved too, using the center-crop
-  intrinsics hack (next section). Its pose is initialized after stage 1 via
-  solvePnP on tag 0 (whose world pose is exact), then refined jointly.
+- **Gripper camera**: solved with the center-crop intrinsics hack (next
+  section) and a rigid MOUNT CONSTRAINT to the tag-1 cube: fixed offset loaded
+  from `config.json` (`apriltags.marker_objects."1".gripper_camera_offset_mm`
+  = (41, 0, 530) mm in the cube frame whose +z points down in the world), orientation = solved yaw
+  about the cube z-axis CENTERED AT THE CUBE CENTER (the whole mount offset
+  rotates with it) followed by a fixed 9 deg pitch about the camera x-axis
+  (`gripper_camera_x_tilt_rad` = 0.1571; the data clearly prefers +9 deg over
+  -9 deg: 0.81 px vs 1.60 px overall RMS). The solve optimizes that single
+  yaw angle; gripper observations therefore also pull on the cube pose
+  through the rigid link. Without the offset or cube detections it falls back
+  to free 6-DOF initialized from tag 0.
 - **Staged solve, highest co-visibility first**: stage 1 uses tags seen by
   >= 2 cameras (0, 5, 6, 7 + cube); stage 2 adds single-camera tags
   (2, 4, 9, 11), initialized from the stage-1 camera poses.
 
-Result on the `20260720_083736` batch: overall RMS **0.60 px** (anchor0 0.48,
-anchor1 0.52, gripper 1.27; every tag < 1 px except tag 0 at 1.09 which the
-gripper also observes).
+Result on the `20260720_083736` batch: overall RMS **0.83 px** (anchor0 0.59,
+anchor1 0.81, gripper 1.74, cube 1.96; solved gripper yaw 315 deg).
 
 ### Reprojection overlays
 

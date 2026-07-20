@@ -16,11 +16,16 @@ their 3D model points with scipy.optimize.least_squares:
   - Anchor cameras: solved 6-DOF extrinsics, initialized at (2,2,2) and
     (-2,-2,2) looking at the origin. Intrinsics are the cranebot3-firmware
     camera_cal values (see calibration.md).
-  - Gripper camera: solved too, with intrinsics from cranebot3-firmware
+  - Gripper camera: solved with intrinsics from cranebot3-firmware
     camera_cal_wide under the center-crop assumption (HACK, unverified - see
-    calibration.md). Its pose is initialized after stage 1 from tag 0 (exact
-    world pose) plus solved tags, then refined jointly in stage 2. Fallback
-    guess: (0,0,1) looking down (-z).
+    calibration.md). It is rigidly mounted to the tag-1 cube: fixed offset
+    loaded from config.json (apriltags.marker_objects."1".
+    gripper_camera_offset_mm, in the cube frame whose +z points down in the
+    world) with orientation = solved yaw about the cube z-axis, centered at
+    the cube CENTER so the whole mount offset rotates with it, followed by a
+    fixed x-tilt about the camera x-axis (gripper_camera_x_tilt_rad). The
+    solve optimizes the yaw angle (gripper_theta) jointly with everything
+    else; without the offset or cube detections: free 6-DOF from tag 0.
 
 The solve runs in two stages, highest co-visibility first: stage 1 uses tags
 seen by both anchors; stage 2 adds tags seen by only one anchor.
@@ -82,6 +87,7 @@ INTRINSICS = {
 
 CAM_INIT_POS = {"anchor0": (2.0, 2.0, 2.0), "anchor1": (-2.0, -2.0, 2.0)}
 GRIPPER_INIT_POS = (0.0, 0.0, 1.0)
+
 ORIGIN_TAG = 0  # fixed at the world frame, never solved
 
 CUBE_FACES = ["+X", "-X", "+Y", "-Y"]  # cube-face normals in the cube frame
@@ -239,11 +245,24 @@ class Calibration:
             self.cube_width_m, self.sizes_m[CUBE_TAG_ID]
         )
         self.cube_verts, self.cube_edges = cube_wireframe(self.cube_width_m)
+        # rigid mount offset of the gripper camera in the cube frame, from
+        # config.json (marker_objects."1".gripper_camera_offset_mm); None ->
+        # gripper is solved as free 6-DOF instead of cube-constrained
+        offset_mm = cube_cfg[str(CUBE_TAG_ID)].get("gripper_camera_offset_mm")
+        self.gripper_cube_offset = (
+            np.array(offset_mm, dtype=float) / 1000.0 if offset_mm is not None else None
+        )
+        # fixed pitch about the camera x-axis (radians), applied after the
+        # solved yaw about the cube z-axis
+        self.gripper_x_tilt = float(
+            cube_cfg[str(CUBE_TAG_ID)].get("gripper_camera_x_tilt_rad", 0.0)
+        )
         # face assignment per cube observation: obs index -> face name
         self.face_assignment = {}
 
         # initial camera poses
         self.cameras = {cam: look_at(pos, target=(0, 0, 0)) for cam, pos in CAM_INIT_POS.items()}
+        self.gripper_theta = 0.0  # gripper yaw about the cube z-axis (mount constraint)
 
         # initial tag poses via solvePnP against the initial cameras
         self.tags = {}  # tag_id -> (rvec_tag2world, tvec_tag2world)
@@ -257,9 +276,10 @@ class Calibration:
         """Tag pose (rvec, tvec tag->world) from one observation, using the
         camera's current pose. None if solvePnP fails or the camera has no
         pose yet (e.g. gripper before its init)."""
-        if obs["cam"] not in self.cameras:
+        try:
+            rvec_c2w, tvec_c2w = self.cam_pose(obs["cam"])
+        except KeyError:
             return None
-        rvec_c2w, tvec_c2w = self.cameras[obs["cam"]]
         K, dist = INTRINSICS[obs["cam"]]
         obj = tag_local_corners(self.sizes_m[obs["tag_id"]])
         ok, rvec_t2c, tvec_t2c = cv2.solvePnP(
@@ -372,12 +392,64 @@ class Calibration:
         pos = cam_center(*self.cameras["gripper"])
         print(f"gripper initial pose from tag {ORIGIN_TAG}: {[round(float(v), 3) for v in pos]}")
 
+    def init_gripper_theta(self):
+        """Initial gripper yaw about the cube z-axis (mount constraint): grid
+        search for the theta with the lowest gripper reprojection error under
+        the stage-1 cube pose."""
+        gripper_obs = [o for o in self.observations if o["cam"] == "gripper"]
+        best = None
+        for deg in range(0, 360, 2):
+            theta = np.deg2rad(deg)
+            rvec_g, tvec_g = self._gripper_pose_from(self.cube_pose, theta)
+            R_g, t_g = rodrigues(rvec_g), tvec_g.reshape(3, 1)
+            total = 0.0
+            for obs in gripper_obs:
+                pts_w = self.obs_model_points(obs, self.tags, self.cube_pose).T
+                p_c = R_g @ pts_w.T + t_g
+                z = np.maximum(p_c[2], 1e-3)
+                proj = (p_c[:2] / z).T
+                total += float(np.sum((proj - obs["corners_norm"]) ** 2))
+            if best is None or total < best[0]:
+                best = (total, theta)
+        self.gripper_theta = best[1]
+        pos = cam_center(*self.cam_pose("gripper"))
+        print(
+            f"gripper mount constraint: theta init {np.rad2deg(self.gripper_theta):.0f} deg, "
+            f"position {[round(float(v), 3) for v in pos]}"
+        )
+
     # -- projection ----------------------------------------------------------
+
+    def _gripper_pose_from(self, cube_pose, theta):
+        """Gripper world->cam (rvec, tvec): rigid mount at
+        self.gripper_cube_offset in the cube frame. The yaw theta about the
+        cube z-axis is centered at the CUBE CENTER, so the whole mount
+        (camera offset included) rotates with it; the fixed x-tilt then
+        pitches the camera about its own x-axis."""
+        R_c2w = rodrigues(cube_pose[0])
+        R_yaw = rodrigues(np.array([0.0, 0.0, theta]))
+        C_w = R_c2w @ (R_yaw @ self.gripper_cube_offset) + cube_pose[1]
+        R_mount = R_yaw @ rodrigues(np.array([self.gripper_x_tilt, 0.0, 0.0]))
+        R_w2c = R_mount @ R_c2w.T
+        t_w2c = -R_w2c @ C_w
+        rvec, _ = cv2.Rodrigues(R_w2c)
+        return rvec.flatten(), t_w2c
+
+    def cam_pose(self, cam):
+        """(rvec, tvec) world->cam for cam. The gripper pose is derived from
+        the cube pose + gripper_theta (mount constraint), not stored."""
+        if (
+            cam == "gripper"
+            and self.cube_pose is not None
+            and self.gripper_cube_offset is not None
+        ):
+            return self._gripper_pose_from(self.cube_pose, self.gripper_theta)
+        return self.cameras[cam]
 
     def project_norm(self, points_w, cam):
         """world points -> normalized pinhole coords of cam. z clamped > 0 so
         points behind the camera yield large but finite residuals."""
-        rvec, tvec = self.cameras[cam]
+        rvec, tvec = self.cam_pose(cam)
         p_c = rodrigues(rvec) @ points_w.T + tvec.reshape(3, 1)
         z = np.maximum(p_c[2], 1e-3)
         return (p_c[:2] / z).T
@@ -455,6 +527,9 @@ class Calibration:
         var_tags = [t for t in active_tag_ids if t != ORIGIN_TAG]
         solve_cube = self.cube_pose is not None
         cams = sorted(self.cameras)
+        # with a cube pose and a configured mount offset, the gripper pose is
+        # derived from the cube pose + gripper_theta instead of free 6-DOF
+        gripper_constrained = solve_cube and self.gripper_cube_offset is not None
 
         def pack():
             parts = []
@@ -464,6 +539,8 @@ class Calibration:
                 parts.extend(self.tags[tag_id])
             if solve_cube:
                 parts.extend(self.cube_pose)
+            if gripper_constrained:
+                parts.append(np.atleast_1d(self.gripper_theta))
             return np.concatenate(parts)
 
         def unpack(x):
@@ -477,7 +554,11 @@ class Calibration:
                 tag_poses[tag_id] = (x[i : i + 3], x[i + 3 : i + 6])
                 i += 6
             cube_pose = (x[i : i + 3], x[i + 3 : i + 6]) if solve_cube else self.cube_pose
-            return cam_poses, tag_poses, cube_pose
+            i += 6 if solve_cube else 0
+            theta = x[i] if gripper_constrained else self.gripper_theta
+            if gripper_constrained:
+                cam_poses["gripper"] = self._gripper_pose_from(cube_pose, theta)
+            return cam_poses, tag_poses, cube_pose, theta
 
         active_obs = [
             o
@@ -487,7 +568,7 @@ class Calibration:
         ]
 
         def residuals(x):
-            cam_poses, tag_poses, cube_pose = unpack(x)
+            cam_poses, tag_poses, cube_pose, theta = unpack(x)
             res = []
             for obs in active_obs:
                 if obs["kind"] == "cube":
@@ -522,10 +603,14 @@ class Calibration:
             f_scale=1.0,
             verbose=2,
         )
-        cam_poses, tag_poses, cube_pose = unpack(result.x)
+        cam_poses, tag_poses, cube_pose, theta = unpack(result.x)
+        if gripper_constrained:
+            # derived from cube_pose + theta; don't store a stale copy
+            del cam_poses["gripper"]
         self.cameras = cam_poses
         self.tags.update(tag_poses)
         self.cube_pose = cube_pose
+        self.gripper_theta = float(theta)
         rms = np.sqrt(2 * result.cost / len(residuals(result.x)))
         print(f"[{label}] converged: {result.message}")
         print(f"[{label}] approx RMS residual: {rms:.3f} px over {len(active_obs)} observations")
@@ -541,11 +626,59 @@ def rms_px_for_obs(cal, obs):
     """Honest pixel RMS for one observation via cv2.projectPoints with
     distortion on the original image coordinates."""
     pts_w = cal.obs_model_points(obs, cal.tags, cal.cube_pose).T
-    rvec, tvec = cal.cameras[obs["cam"]]
+    rvec, tvec = cal.cam_pose(obs["cam"])
     K, dist = INTRINSICS[obs["cam"]]
     proj, _ = cv2.projectPoints(pts_w, rvec, tvec, K, dist)
     proj = proj.reshape(-1, 2)
     return float(np.sqrt(np.mean(np.sum((proj - obs["corners_px"]) ** 2, axis=1))))
+
+
+def draw_gripper_solution(out, cal, rvec, tvec, K, dist):
+    """Draw the solved gripper camera (center dot, label, and a small frustum
+    matching its intrinsics) and the L-shaped mount offset from the cube
+    center: first the cube-frame z segment, then the y segment, as two white
+    line segments."""
+    grip_rvec, grip_tvec = cal.cam_pose("gripper")
+    grip_C = cam_center(grip_rvec, grip_tvec)
+    R_c2w = rodrigues(cal.cube_pose[0])
+    cube_C = cal.cube_pose[1]
+    R_yaw = rodrigues(np.array([0.0, 0.0, cal.gripper_theta]))
+    z_part = R_c2w @ (R_yaw @ np.array([0.0, 0.0, cal.gripper_cube_offset[2]]))
+    y_part = R_c2w @ (R_yaw @ np.array([0.0, cal.gripper_cube_offset[1], 0.0]))
+    elbow = cube_C + z_part
+    # frustum at depth d matching the gripper intrinsics: rays through the
+    # image corners of the 384x384 frame
+    fx, fy = K_GRIPPER[0, 0], K_GRIPPER[1, 1]
+    cx, cy = K_GRIPPER[0, 2], K_GRIPPER[1, 2]
+    d = 0.2  # frustum depth, meters
+    img_corners = np.array([[0, 0], [384, 0], [384, 384], [0, 384]], dtype=float)
+    corners_cam = (
+        np.stack(
+            [
+                (img_corners[:, 0] - cx) / fx,
+                (img_corners[:, 1] - cy) / fy,
+                np.ones(4),
+            ]
+        )
+        * d
+    )
+    R_g_c2w = rodrigues(grip_rvec).T  # gripper cam -> world
+    corners_w = (R_g_c2w @ corners_cam + grip_C.reshape(3, 1)).T
+    pts, _ = cv2.projectPoints(
+        np.vstack([cube_C, elbow, grip_C, corners_w]), rvec, tvec, K, dist
+    )
+    p = pts.reshape(-1, 2).astype(int)
+    cv2.line(out, tuple(p[0]), tuple(p[1]), (255, 255, 255), 2)  # z offset
+    cv2.line(out, tuple(p[1]), tuple(p[2]), (255, 255, 255), 2)  # y offset
+    cv2.circle(out, tuple(p[2]), 5, (255, 255, 255), -1)  # gripper camera center
+    frustum = p[3:]
+    for i in range(4):  # edges from center + image-plane rectangle
+        cv2.line(out, tuple(p[2]), tuple(frustum[i]), (255, 255, 255), 1)
+        cv2.line(out, tuple(frustum[i]), tuple(frustum[(i + 1) % 4]), (255, 255, 255), 1)
+    cv2.putText(
+        out, "gripper", tuple(p[2] + [8, -8]), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+        (255, 255, 255), 2,
+    )
 
 
 def render_reprojection(image, cal, cam, observations, note=None):
@@ -553,13 +686,13 @@ def render_reprojection(image, cal, cam, observations, note=None):
     outlines + X marks); cube also gets a white wireframe. The source image
     is dimmed to 33% so the annotations stand out."""
     out = cv2.convertScaleAbs(image, alpha=0.33, beta=0)
+    rvec, tvec = cal.cam_pose(cam)
+    K, dist = INTRINSICS[cam]
     rms_values = []
     for obs in observations:
         rms_values.append(rms_px_for_obs(cal, obs))
         for pt in obs["corners_px"]:
             cv2.circle(out, tuple(np.round(pt).astype(int)), 3, DETECTED_COLOR, -1)
-        rvec, tvec = cal.cameras[cam]
-        K, dist = INTRINSICS[cam]
         pts_w = cal.obs_model_points(obs, cal.tags, cal.cube_pose).T
         proj, _ = cv2.projectPoints(pts_w, rvec, tvec, K, dist)
         proj = proj.reshape(-1, 2).astype(int)
@@ -574,6 +707,8 @@ def render_reprojection(image, cal, cam, observations, note=None):
             vproj = vproj.reshape(-1, 2).astype(int)
             for a, b in cal.cube_edges:
                 cv2.line(out, tuple(vproj[a]), tuple(vproj[b]), CUBE_COLOR, 1)
+    if cam != "gripper" and cal.cube_pose is not None and cal.gripper_cube_offset is not None:
+        draw_gripper_solution(out, cal, rvec, tvec, K, dist)
     if rms_values:
         text = f"rms {np.mean(rms_values):.2f} px ({len(rms_values)} tags)"
         cv2.putText(out, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
@@ -590,15 +725,29 @@ def save_results_json(path, cal, observations, detections_path, stages):
         }
 
     cams = {}
-    for cam, (rvec, tvec) in cal.cameras.items():
+    for cam in sorted({o["cam"] for o in observations}):
+        rvec, tvec = cal.cam_pose(cam)
         obs_list = [o for o in observations if o["cam"] == cam]
         rms = [rms_px_for_obs(cal, o) for o in obs_list]
-        cams[cam] = {
+        entry = {
             "position_m": [round(float(v), 4) for v in cam_center(rvec, tvec)],
             "rvec_world_to_cam": [round(float(v), 6) for v in rvec],
             "tvec_world_to_cam": [round(float(v), 6) for v in tvec],
             "rms_px": round(float(np.mean(rms)), 3) if rms else None,
         }
+        if cam == "gripper" and cal.gripper_cube_offset is not None:
+            entry["mount_constraint"] = {
+                "offset_in_cube_frame_m": [round(float(v), 4) for v in cal.gripper_cube_offset],
+                "x_tilt_rad": round(float(cal.gripper_x_tilt), 4),
+                "x_tilt_deg": round(float(np.rad2deg(cal.gripper_x_tilt)), 2),
+                "source": "config.json apriltags.marker_objects.\"1\"",
+                "note": "rigid mount in the tag-1 cube frame; solved yaw about the "
+                "cube z-axis, fixed x-tilt about the camera x-axis, y rotation 0; "
+                "pose derived from cube pose + theta",
+                "theta_rad": round(float(cal.gripper_theta), 4),
+                "theta_deg": round(float(np.rad2deg(cal.gripper_theta)), 1),
+            }
+        cams[cam] = entry
     tags = {}
     for tag_id, (rvec, tvec) in sorted(cal.tags.items()):
         obs_list = [o for o in observations if o["kind"] == "tag" and o["tag_id"] == tag_id]
@@ -711,7 +860,10 @@ def main():
     cal.solve(stage1_ids, "stage 1", active_cams=anchor_cams)
     cal._reassign_faces()
     cal._init_tag_poses(only=stage2_ids)  # re-init against solved stage-1 cameras
-    cal.init_gripper_pose()  # from tag 0 (exact world pose) + solved tags
+    if cal.cube_pose is not None and cal.gripper_cube_offset is not None:
+        cal.init_gripper_theta()  # mount constraint: yaw search about cube axis
+    else:
+        cal.init_gripper_pose()  # free 6-DOF fallback when no cube is observed
     missing = [t for t in stage2_ids if t not in cal.tags]
     if missing:
         cal._init_tag_poses(only=missing)  # tags only visible to the gripper
@@ -727,11 +879,11 @@ def main():
     cal._reassign_faces()
     stages.append(
         {"stage": 2, "tags": stage1_ids + stage2_ids, "cube": True,
-         "cameras": sorted(cal.cameras)}
+         "cameras": sorted({o["cam"] for o in observations})}
     )
 
     print("\nper-camera RMS (px):")
-    for cam in sorted(cal.cameras):
+    for cam in sorted({o["cam"] for o in observations}):
         rms = [rms_px_for_obs(cal, o) for o in observations if o["cam"] == cam]
         print(f"  {cam}: {np.mean(rms):.3f}")
     print("per-tag RMS (px):")

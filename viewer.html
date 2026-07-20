@@ -110,6 +110,40 @@ function camQuaternion(R) {
     0, 0, 0, 1));
 }
 
+// row-major 3x3 helpers
+function mat3Mul(A, B) {
+  const out = new Array(9);
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      out[i*3+j] = A[i*3]*B[j] + A[i*3+1]*B[3+j] + A[i*3+2]*B[6+j];
+  return out;
+}
+function mat3T(A) { return [A[0],A[3],A[6], A[1],A[4],A[7], A[2],A[5],A[8]]; }
+function mat3Vec(A, v) {
+  return [
+    A[0]*v[0] + A[1]*v[1] + A[2]*v[2],
+    A[3]*v[0] + A[4]*v[1] + A[5]*v[2],
+    A[6]*v[0] + A[7]*v[1] + A[8]*v[2],
+  ];
+}
+function xRot(th) { const c = Math.cos(th), s = Math.sin(th); return [1,0,0, 0,c,-s, 0,s,c]; }
+function zRot(th) { const c = Math.cos(th), s = Math.sin(th); return [c,-s,0, s,c,0, 0,0,1]; }
+
+// Gripper pose derived from the cube pose + mount constraint (offset + fixed
+// x-tilt from config.json via the calibration JSON, plus the solved theta):
+// the mount is one rigid body whose only DOF is the yaw theta about the cube
+// z-axis, centered at the cube center. Null when no constraint/cube exists.
+function gripperMountPose() {
+  const mc = CAL.cameras.gripper && CAL.cameras.gripper.mount_constraint;
+  if (!mc || !CAL.cube) return null;
+  const Rc = rodrigues(CAL.cube.rvec);
+  const Ryaw = zRot(mc.theta_rad || 0);
+  const R = mat3Mul(mat3Mul(Ryaw, xRot(mc.x_tilt_rad || 0)), mat3T(Rc));
+  const off = mat3Vec(Rc, mat3Vec(Ryaw, mc.offset_in_cube_frame_m));
+  const C = off.map((v, i) => v + CAL.cube.center_m[i]);
+  return { R, C };
+}
+
 // ---------------------------------------------------------------------------
 // scene setup (world frame is z-up, as solved)
 // ---------------------------------------------------------------------------
@@ -174,13 +208,28 @@ const state = { mode: 'free', source: 'reprojected', alignedCam: null };
 const camQuads = {};   // cam -> Mesh (image quad)
 const camRms = {};     // cam -> rms px
 
+// per-camera world->cam rotation + center. The gripper pose is derived from
+// the cube pose + mount constraint (single DOF: yaw at the cube center), so
+// offset and orientation move as one rigid body; falls back to the stored
+// solved pose when no constraint exists.
+const camPoses = {};
+for (const cam of CAMS) {
+  camPoses[cam] = {
+    R: rodrigues(CAL.cameras[cam].rvec_world_to_cam),
+    C: CAL.cameras[cam].position_m,
+  };
+}
+if (CAMS.includes('gripper')) {
+  const mountPose = gripperMountPose();
+  if (mountPose) camPoses.gripper = mountPose;
+}
+
 CAMS.forEach((cam, idx) => {
   const info = CAL.cameras[cam];
   const intr = intrinsicsFor(cam);
   const [w, h] = intr.resolution;
   const K = intr.K, fx = K[0][0], fy = K[1][1], cx = K[0][2], cy = K[1][2];
-  const R = rodrigues(info.rvec_world_to_cam);
-  const C = info.position_m;
+  const R = camPoses[cam].R, C = camPoses[cam].C;
   camRms[cam] = info.rms_px;
   const color = CAM_COLORS[idx % CAM_COLORS.length];
 
@@ -255,6 +304,31 @@ if (CAL.cube) {
     new THREE.EdgesGeometry(new THREE.BoxGeometry(w, w, w)),
     new THREE.LineBasicMaterial({ color: 0xffffff })));
   scene.add(g);
+
+  // gripper mount offset as an L-shaped pair of segments (same as the
+  // reprojection rendering): cube center -> elbow along cube-frame z,
+  // elbow -> gripper center along cube-frame y, both rotated by the solved
+  // yaw theta (the mount rotates about the cube center as one rigid body)
+  const mc = CAL.cameras.gripper && CAL.cameras.gripper.mount_constraint;
+  if (mc) {
+    const off = mc.offset_in_cube_frame_m;
+    const Ryaw = zRot(mc.theta_rad || 0);
+    const yawed = v => mat3Vec(R, mat3Vec(Ryaw, v)); // cube-frame vec -> world
+    const cubeC = new THREE.Vector3(...CAL.cube.center_m);
+    const gripC = new THREE.Vector3(...camPoses.gripper.C);
+    const elbow = cubeC.clone().add(new THREE.Vector3(...yawed([0, 0, off[2]])));
+    const seg = (a, b, color) => scene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([a, b]),
+      new THREE.LineBasicMaterial({ color })));
+    seg(cubeC, elbow, 0x4f8cff);  // z-axis shift
+    seg(elbow, gripC, 0x51cf66);  // y-axis shift
+    const zLabel = makeLabel('z', '#4f8cff', 0.07);
+    zLabel.position.copy(cubeC).lerp(elbow, 0.5);
+    scene.add(zLabel);
+    const yLabel = makeLabel('y', '#51cf66', 0.07);
+    yLabel.position.copy(elbow).lerp(gripC, 0.5);
+    scene.add(yLabel);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,18 +351,17 @@ function letterbox(aspect) {
 }
 
 function alignTo(cam, instant) {
-  const info = CAL.cameras[cam];
   const intr = intrinsicsFor(cam);
   const [w, h] = intr.resolution;
   const K = intr.K;
-  const R = rodrigues(info.rvec_world_to_cam);
+  const pose = camPoses[cam];
   state.mode = 'aligned';
   state.alignedCam = cam;
   controls.enabled = false;
   tween = {
     t0: performance.now(), dur: instant ? 0 : 1600,
-    fromPos: camera.position.clone(), toPos: new THREE.Vector3(...info.position_m),
-    fromQ: camera.quaternion.clone(), toQ: camQuaternion(R),
+    fromPos: camera.position.clone(), toPos: new THREE.Vector3(...pose.C),
+    fromQ: camera.quaternion.clone(), toQ: camQuaternion(pose.R),
     fromFov: camera.fov, toFov: 2*Math.atan(h/(2*K[1][1]))*180/Math.PI,
     fromAspect: camera.aspect, toAspect: w/h,
   };
